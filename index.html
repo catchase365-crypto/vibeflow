@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Vibe 动态沙盘生成器 (直连 Gemini)</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; background-color: #000000; color: #c9d1d9; font-family: -apple-system, sans-serif; display: flex; flex-direction: column; height: 100vh; }
+        
+        /* 顶部控制台 */
+        #control-panel { padding: 20px; background: #000000; border-bottom: 1px solid #30363d; display: flex; gap: 15px; align-items: flex-start; z-index: 10;}
+        .input-group { display: flex; flex-direction: column; flex: 1; }
+        label { font-size: 12px; color: #8b949e; margin-bottom: 5px; font-weight: bold; }
+        input, textarea { background: #000000; border: 1px solid #30363d; color: #c9d1d9; padding: 10px; border-radius: 6px; font-family: inherit; }
+        input { height: 20px; }
+        textarea { height: 60px; resize: none; }
+        
+        button { background-color: #238636; color: white; border: none; padding: 0 25px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: 0.2s; height: 82px; margin-top: 17px;}
+        button:hover { background-color: #2ea043; }
+        button:disabled { background-color: #30363d; color: #8b949e; cursor: not-allowed; }
+
+        /* 画布区域 */
+        #mynetwork { flex: 1; background: #000000; position: relative; overflow: hidden; }
+        
+        /* 状态提示 */
+        #status-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 44px; color: #8b949e; text-align: center; pointer-events: none; z-index: 20;}
+        
+        /* 右侧详情面板 */
+        #side-panel { position: absolute; right: -400px; top: 0; width: 380px; height: 100%; background: #000000; border-left: 1px solid #30363d; transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 100; display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; box-shadow: -5px 0 15px rgba(0,0,0,0.5); }
+        #side-panel.open { right: 0; }
+        #markdown-viewer { flex: 1; overflow-y: auto; background: #000000; padding: 15px; border-radius: 6px; border: 1px solid #30363d; font-size: 14px; line-height: 1.6; }
+        #markdown-viewer h1, #markdown-viewer h2 { border-bottom: 1px solid #30363d; padding-bottom: 5px; }
+        #markdown-editor { flex: 1; display: none; background: #000000; color: #c9d1d9; border: 1px solid #58a6ff; padding: 15px; border-radius: 6px; resize: none; font-family: monospace; outline: none; }
+        .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .panel-footer { display: flex; gap: 10px; margin-top: 15px; }
+        .loading-spinner { display: inline-block; width: 40px; height: 40px; border: 4px solid rgba(88, 166, 255, 0.3); border-radius: 50%; border-top-color: #58a6ff; animation: spin 1s ease-in-out infinite; margin-bottom: 15px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <div id="control-panel">
+        <div class="input-group" style="flex: 0.5;">
+            <label>🔑 Gemini API Key</label>
+            <input type="password" id="apiKey" placeholder="输入你的 API Key (将保存在本地)">
+        </div>
+        <div class="input-group">
+            <label>🧠 想让 AI 生成什么动态沙盘？</label>
+            <textarea id="promptInput" placeholder="例如：详细拆解马斯克的第一性原理..."></textarea>
+        </div>
+        <div style="display:flex; gap: 5px;">
+            <button id="generateBtn" onclick="generateGraph()" style="width: 100px;">⚡ 生成</button>
+            <button id="downloadBtn" onclick="downloadData()" style="background-color:#58a6ff; width: 80px;">📥 导出</button>
+            <button onclick="changeFontSize(2)" style="background-color:#8b949e; width: 45px; padding: 0;" title="放大文字">A+</button>
+            <span id="fontSizeIndicator" style="color:#8b949e; font-size:12px; align-self:center; min-width:30px; text-align:center;">44px</span>
+            <button onclick="changeFontSize(-2)" style="background-color:#8b949e; width: 45px; padding: 0;" title="缩小文字">A-</button>
+            <button onclick="changeSpacing(50)" style="background-color:#8b949e; width: 45px; padding: 0;" title="增加间距 (松散)">S+</button>
+            <span id="spacingIndicator" style="color:#8b949e; font-size:12px; align-self:center; min-width:30px; text-align:center;">350</span>
+            <button onclick="changeSpacing(-50)" style="background-color:#8b949e; width: 45px; padding: 0;" title="减少间距 (紧凑)">S-</button>
+            <label for="fileInput" style="cursor:pointer; background-color:#30363d; padding: 25px 15px; border-radius:6px; margin-top:17px; height: 32px; display:flex; align-items:center;">📁 加载</label>
+            <input type="file" id="fileInput" style="display:none;" onchange="loadData(event)">
+        </div>
+    </div>
+
+    <div id="side-panel">
+        <div class="panel-header">
+            <h3 id="panel-title" style="margin:0; color: #58a6ff;">节点详情</h3>
+            <span style="font-size: 12px; color: #8b949e;">双击节点开启此面板</span>
+        </div>
+        <div id="markdown-viewer"></div>
+        <textarea id="markdown-editor" placeholder="支持 Markdown 格式内容..."></textarea>
+        <div class="panel-footer">
+            <button id="editBtn" onclick="toggleEditMode()" style="flex:1; height:40px; margin-top:0; font-size: 14px;">编辑内容</button>
+            <button id="saveBtn" onclick="saveNodeMarkdown()" style="flex:1; height:40px; margin-top:0; font-size: 14px; display:none; background-color:#238636;">保存修改</button>
+            <button onclick="closeSidePanel()" style="width:60px; height:40px; margin-top:0; font-size: 14px; background-color:#30363d;">关闭</button>
+        </div>
+    </div>
+
+    <div id="mynetwork">
+        <div id="status-overlay">
+            <div style="font-size: 40px; margin-bottom: 10px;">🌌</div>
+            输入提示词，让 AI 为你构建宇宙
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        // 本地记忆 API Key
+        const apiKeyInput = document.getElementById('apiKey');
+        apiKeyInput.value = localStorage.getItem('gemini_api_key_vis') || '';
+        apiKeyInput.addEventListener('change', () => localStorage.setItem('gemini_api_key_vis', apiKeyInput.value.trim()));
+
+        let network = null;
+        let currentNodeId = null;
+        let nodesDataSet = null;
+        let edgesDataSet = null;
+        let currentFontSize = 44; // 【默认字号调节】在此修改初始字体大小 (默认18)
+        let currentSpringLength = 350; // 【默认间距调节】在此修改初始节点间距
+
+        // 核心函数：调用 Gemini 并就地渲染
+        async function generateGraph() {
+            const apiKey = apiKeyInput.value.trim();
+            const userPrompt = document.getElementById('promptInput').value.trim();
+            const btn = document.getElementById('generateBtn');
+            const overlay = document.getElementById('status-overlay');
+
+            if (!apiKey) return alert("请先填写 Gemini API Key！");
+            if (!userPrompt) return alert("请填写你想要生成的主题！");
+
+            // UI 切换为加载状态
+            btn.disabled = true;
+            btn.innerText = "生成中...";
+            if (network) { network.destroy(); network = null; } // 清除旧图并重置变量
+            
+            // 确保 overlay 存在并显示加载动画
+            const networkContainer = document.getElementById('mynetwork');
+            if (!document.getElementById('status-overlay')) {
+                const newOverlay = document.createElement('div');
+                newOverlay.id = 'status-overlay';
+                networkContainer.appendChild(newOverlay);
+            }
+            document.getElementById('status-overlay').style.display = 'block';
+            document.getElementById('status-overlay').innerHTML = `<div class="loading-spinner"></div><br><span style="color:#58a6ff;">AI 正在进行逻辑推演与节点连线，请稍候...</span>`;
+
+            // 🌟 核心突破：给 AI 设定的“紧箍咒” (极其严格的 JSON 规范与连通性限制)
+            const systemInstruction = `
+你是一个顶级的数据结构工程师。你的任务是将用户输入的主题，拆解成一个高度复杂、逻辑严密的网络关系图数据。
+**你必须严格遵守以下所有规则，任何违反都会导致系统崩溃：**
+
+1. **输出格式**：绝对只能输出一个纯 JSON 对象，不要输出任何 Markdown 代码块标记（如 \`\`\`json ），不要输出任何解释性文字。
+2. **JSON 结构**：必须包含 "nodes" 和 "edges" 两个数组。
+   - nodes 数组元素：{"id": 数字, "label": "简短的文字说明", "group": "类别英文名"}
+   - edges 数组元素：{"from": 源id数字, "to": 目标id数字, "label": "关系说明文字(可选)"}
+3. **消除孤立节点（极其重要）**：生成的图必须是完全连通的！nodes 数组中的每一个 id，都**必须**在 edges 数组的 from 或 to 中至少出现一次。绝不允许存在没有连线的孤立节点！
+4. **复杂度要求**：节点数量应在 15 到 30 个之间，形成复杂的网状交织，而不是单调的一条直线。
+5. **Group 分类**：节点数据中的 "group" 字段，【必须且只能】从以下 10 个词中选择一个：['core', 'action', 'concept', 'data', 'human', 'method', 'nature', 'process', 'tech', 'tool']。绝对不允许你自己发明任何其他的组名！否则渲染会崩溃！
+            `;
+
+            try {
+                // 调用 Gemini API (修正模型名称)
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${apiKey}`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [
+                            { parts: [{ text: "系统指令:\n" + systemInstruction + "\n\n用户主题:\n" + userPrompt }] }
+                        ],
+                        generationConfig: { temperature: 0.3 } // 调低温度，让 AI 更加理性严谨，减少 JSON 格式错误
+                    })
+                });
+
+                if (!response.ok) throw new Error("API 请求失败，请检查网络或 API Key。");
+                
+                const responseData = await response.json();
+                let aiText = responseData.candidates[0].content.parts[0].text;
+                
+                // 暴力清洗 AI 可能带有的 Markdown 格式符号
+                aiText = aiText.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/im, '').trim();
+
+                // 解析 JSON
+                const graphData = JSON.parse(aiText);
+
+                // 校验连通性防错 (双保险)
+                if (!graphData.nodes || !graphData.edges) throw new Error("AI 返回的数据缺少 nodes 或 edges");
+
+                // 渲染 Vis.js 图表
+                const overlay = document.getElementById('status-overlay');
+                if (overlay) overlay.style.display = 'none'; // 隐藏加载提示
+                window.currentGraphData = graphData;
+                // 为每个节点初始化空的 markdown 字段
+                graphData.nodes.forEach(n => { if(!n.markdown) n.markdown = `# ${n.label}\n在此输入详细的知识点...`; });
+                renderNetwork(graphData);
+
+            } catch (error) {
+                console.error(error);
+                overlay.innerHTML = `<div style="color:#f85149; font-size: 60px; margin-bottom: 10px;">⚠️</div>解析失败或超时，AI 可能格式错乱。<br>错误信息: ${error.message}`;
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "⚡ 一键生成沙盘";
+            }
+        }
+
+        // 导出数据：从当前的 DataSet 中提取最新状态进行导出
+        function downloadData() {
+            if (!nodesDataSet || !edgesDataSet) return alert("没有可导出的数据！");
+            const exportData = {
+                nodes: nodesDataSet.get(),
+                edges: edgesDataSet.get()
+            };
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'vibe_graph.json';
+            a.click();
+        }
+
+        // 侧边栏逻辑
+        function openSidePanel(nodeId) {
+            currentNodeId = nodeId;
+            const node = nodesDataSet.get(nodeId);
+            document.getElementById('panel-title').innerText = node.label;
+            const content = node.markdown || `# ${node.label}\n暂无详细内容`;
+            document.getElementById('markdown-viewer').innerHTML = marked.parse(content);
+            document.getElementById('markdown-editor').value = content;
+            document.getElementById('side-panel').classList.add('open');
+            exitEditMode();
+        }
+
+        function closeSidePanel() {
+            document.getElementById('side-panel').classList.remove('open');
+        }
+
+        function toggleEditMode() {
+            document.getElementById('markdown-viewer').style.display = 'none';
+            document.getElementById('markdown-editor').style.display = 'block';
+            document.getElementById('editBtn').style.display = 'none';
+            document.getElementById('saveBtn').style.display = 'block';
+        }
+
+        function exitEditMode() {
+            document.getElementById('markdown-viewer').style.display = 'block';
+            document.getElementById('markdown-editor').style.display = 'none';
+            document.getElementById('editBtn').style.display = 'block';
+            document.getElementById('saveBtn').style.display = 'none';
+        }
+
+        function saveNodeMarkdown() {
+            const newContent = document.getElementById('markdown-editor').value;
+            // 更新 DataSet，这是图表数据的唯一事实来源
+            nodesDataSet.update({ id: currentNodeId, markdown: newContent });
+            document.getElementById('markdown-viewer').innerHTML = marked.parse(newContent);
+            exitEditMode();
+        }
+
+        // 加载数据
+        function loadData(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    const container = document.getElementById('mynetwork');
+                    // 清除旧画布内容，只保留 loading 层用于后续状态显示
+                    container.innerHTML = '<div id="status-overlay" style="display:none;"></div>';
+                    if (network) { network.destroy(); network = null; }
+                    window.currentGraphData = data;
+                    renderNetwork(data);
+                } catch (err) { 
+                    console.error(err);
+                    alert("文件解析失败，请检查 JSON 格式是否标准。错误: " + err.message); 
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = ''; // 清空 input 值以允许重复触发 change 事件
+        }
+
+        function changeFontSize(delta) {
+            currentFontSize += delta;
+            if (currentFontSize < 8) currentFontSize = 8;
+            if (currentFontSize > 50) currentFontSize = 50;
+            
+            // 更新 UI 显示
+            const indicator = document.getElementById('fontSizeIndicator');
+            if (indicator) indicator.innerText = currentFontSize + 'px';
+
+            if (!network) return;
+            network.setOptions({
+                nodes: { font: { size: currentFontSize } },
+                edges: { font: { size: Math.max(8, currentFontSize - 3) } }
+            });
+        }
+
+        function changeSpacing(delta) {
+            currentSpringLength += delta;
+            if (currentSpringLength < 50) currentSpringLength = 50;
+            if (currentSpringLength > 1000) currentSpringLength = 1000;
+            const indicator = document.getElementById('spacingIndicator');
+            if (indicator) indicator.innerText = currentSpringLength;
+            if (network) {
+                network.setOptions({ physics: { barnesHut: { springLength: currentSpringLength } } });
+            }
+        }
+
+        // 渲染引擎
+        function renderNetwork(graphData) {
+            const container = document.getElementById('mynetwork');
+
+            // 确保加载的数据中，每个节点都有 markdown 属性（如果没有则赋默认值）
+            graphData.nodes.forEach(n => {
+                if (!n.markdown) n.markdown = `# ${n.label}\n在此输入详细的知识点...`;
+            });
+            
+            // 定义极其科幻的预设组颜色
+            const options = {
+                nodes: {
+                    shape: 'box',
+                    margin: { top: 10, bottom: 10, left: 15, right: 15 },
+                    widthConstraint: { minimum: 60, maximum: 160 },
+                    borderWidth: 1,
+                    font: { color: '#c9d1d9', size: currentFontSize, face: '-apple-system', bold: true, multi: 'md' },
+                    shapeProperties: { borderRadius: 8 },
+                    shadow: { enabled: true, color: 'rgba(0,0,0,0.5)', size: 3 }
+                },
+                edges: {
+                    width: 2,
+                    arrows: { to: { enabled: true, scaleFactor: 1.2, type: 'arrow' } },
+                    color: { color: 'rgba(255, 255, 255, 0.6)', highlight: '#ffffff', hover: '#ffffff' },
+                    font: {
+                        color: '#ffffff', 
+                        size: Math.max(12, currentFontSize - 10), 
+                        background: 'transparent', 
+                        strokeWidth: 3, 
+                        strokeColor: '#000000', 
+                        align: 'horizontal'
+                    },
+                    smooth: { type: 'continuous', roundness: 0.4 },
+                    shadow: { enabled: false }
+                },
+                physics: {
+                    barnesHut: {
+                        gravitationalConstant: -25000, 
+                        centralGravity: 0.3,
+                        springLength: 350,
+                        avoidOverlap: 1
+                    },
+                    stabilization: { iterations: 500, fit: true },
+                    solver: 'barnesHut'
+                },
+                groups: {
+                    core: { color: { background: '#58a6ff', border: '#ffffff' }, font: { color: '#000000', bold: true } },
+                    action: { color: { background: '#f85149', border: '#ffffff' }, font: { color: '#ffffff', bold: true } },
+                    concept: { color: { background: '#d2a8ff', border: '#ffffff' }, font: { color: '#000000', bold: true } },
+                    data: { color: { background: '#1f6feb', border: '#ffffff' }, font: { color: '#ffffff', bold: true } },
+                    human: { color: { background: '#ffa657', border: '#ffffff' }, font: { color: '#000000', bold: true } },
+                    method: { color: { background: '#7ee787', border: '#ffffff' }, font: { color: '#000000', bold: true } },
+                    nature: { color: { background: '#238636', border: '#ffffff' }, font: { color: '#ffffff', bold: true } },
+                    process: { color: { background: '#8b949e', border: '#ffffff' }, font: { color: '#000000', bold: true } },
+                    tech: { color: { background: '#30363d', border: '#ffffff' }, font: { color: '#ffffff', bold: true } },
+                    tool: { color: { background: '#e3b341', border: '#ffffff' }, font: { color: '#000000', bold: true } }
+                }
+            };
+
+            // 自动处理边文字换行：4字及以上自动拆分为双行 (上多下少原则)
+            const processedEdges = graphData.edges.map(edge => {
+                if (edge.label && edge.label.length >= 4) {
+                    const len = edge.label.length;
+                    const mid = Math.ceil(len / 2);
+                    return { ...edge, label: edge.label.slice(0, mid) + '\n' + edge.label.slice(mid) };
+                }
+                return edge;
+            });
+
+            // 使用 DataSet 以支持动态更新
+            nodesDataSet = new vis.DataSet(graphData.nodes);
+            edgesDataSet = new vis.DataSet(processedEdges);
+            
+            network = new vis.Network(container, { nodes: nodesDataSet, edges: edgesDataSet }, options);
+
+            // 双击弹出编辑详情
+            network.on("doubleClick", function (params) {
+                if (params.nodes.length > 0) {
+                    openSidePanel(params.nodes[0]);
+                }
+            });
+
+            // 点击节点时，通过重置为 null 来恢复 Group 预设的高对比度颜色，或使无关节点变暗
+            network.on("click", function (params) {
+                if (params.nodes.length > 0) {
+                    const nodeId = params.nodes[0];
+                    const connectedNodes = network.getConnectedNodes(nodeId);
+                    const allNodes = nodesDataSet.getIds();
+                    const allEdges = edgesDataSet.getIds();
+                    const connectedEdges = network.getConnectedEdges(nodeId);
+
+                    const updates = allNodes.map(id => {
+                        const isTarget = (id === nodeId || connectedNodes.includes(id));
+                        return {
+                            id,
+                            // 如果是目标或邻居，重置颜色和字体为 null，强制使用 Options/Groups 中的预设高对比度配色
+                            color: isTarget ? null : { background: '#1a1a1a', border: '#333333' },
+                            font: isTarget ? null : { color: '#444444' }
+                        };
+                    });
+                    nodesDataSet.update(updates);
+                    
+                    const edgeUpdates = allEdges.map(id => ({
+                        id,
+                        color: connectedEdges.includes(id) ? null : { color: 'rgba(255, 255, 255, 0.05)' },
+                        font: connectedEdges.includes(id) ? null : { color: 'rgba(255, 255, 255, 0.05)', strokeColor: 'transparent' }
+                    }));
+                    edgesDataSet.update(edgeUpdates);
+                } else {
+                    // 点击空白处，全部重置为 null 以恢复全局 Options 和 Groups 定义的颜色
+                    nodesDataSet.update(nodesDataSet.getIds().map(id => ({ id, color: null, font: null })));
+                    edgesDataSet.update(edgesDataSet.getIds().map(id => ({ id, color: null, font: null })));
+                }
+            });
+
+
+        }
+    </script>
+</body>
+</html>
